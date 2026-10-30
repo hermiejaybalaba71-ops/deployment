@@ -28,5 +28,11 @@ six>=1.15.0 ; sys_platform != "win32"
 # HTTP service entrypoint (ml/service.py) - Vercel Python runtime
 fastapi>=0.115
 
+# ASGI server for the Docker image (`uvicorn app.main:app`). Vercel's Python
+# runtime serves the ASGI app itself, but Render needs an explicit server -
+# fastapi does NOT pull uvicorn in, so without this the container crashes on
+# start with "No module named uvicorn".
+uvicorn>=0.24
+
 # Excel training-data support (ml/training_data.xlsx)
 openpyxl>=3.1
