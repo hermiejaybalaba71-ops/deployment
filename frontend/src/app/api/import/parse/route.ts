@@ -7,7 +7,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// The ML service on Render may be asleep (free tier) when this route is hit:
+// waking it costs ~50 s, so this budget has to cover the cold start plus the
+// actual sheet parse instead of timing out mid-import.
+export const maxDuration = 300;
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const ALLOWED = [".csv", ".xlsx", ".xlsm", ".xltx"];
@@ -164,7 +167,9 @@ export async function POST(req: Request) {
           "X-File-Name": encodeURIComponent(file.name),
         },
         body: fileBytes,
-        signal: AbortSignal.timeout(50_000),
+        // Cold start (~50 s, free tier) + reading a 20 MB workbook: the old
+        // 50 s abort killed the import whenever Render was asleep.
+        signal: AbortSignal.timeout(240_000),
       });
     } catch (err: unknown) {
       return NextResponse.json(
