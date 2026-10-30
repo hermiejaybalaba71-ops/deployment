@@ -5,7 +5,9 @@ from io import BytesIO
 import contextlib
 import io
 import json
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -79,10 +81,35 @@ class OcrIncomeExtractionTests(unittest.TestCase):
         self.assertEqual(match["status"], "mismatch")
 
     def test_ml_health_reports_required_ocr_runtime_modules(self):
-        payload = json.loads(health().body)
+        with (
+            patch("ml.service.version", return_value="1.2.3"),
+            patch("ml.service.importlib.import_module", side_effect=[
+                SimpleNamespace(__version__="4.10.0"),
+                SimpleNamespace(__version__="1.24.0"),
+                SimpleNamespace(),
+            ]),
+        ):
+            payload = json.loads(health().body)
 
-        self.assertTrue(payload["opencv"])
-        self.assertTrue(payload["onnxruntime"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["ocr_ready"])
+        self.assertEqual(payload["ocr_runtime"]["opencv"], "4.10.0")
+        self.assertEqual(payload["ocr_runtime"]["onnxruntime"], "1.24.0")
+        self.assertEqual(payload["ocr_runtime"]["rapidocr"], "1.2.3")
+
+    def test_ml_health_exposes_missing_ocr_dependencies_without_failing_service(self):
+        with (
+            patch("ml.service.version", side_effect=PackageNotFoundError),
+            patch(
+                "ml.service.importlib.import_module",
+                side_effect=ModuleNotFoundError("No module named 'cv2'"),
+            ),
+        ):
+            payload = json.loads(health().body)
+
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["ocr_ready"])
+        self.assertEqual(len(payload["ocr_errors"]), 3)
 
     def test_scan_analytics_leaves_match_percent_unavailable_without_ocr_income(self):
         record = {
@@ -105,6 +132,33 @@ class OcrIncomeExtractionTests(unittest.TestCase):
         self.assertIsNone(analytics["match_rate_pct"])
         self.assertIsNone(analytics["avg_align_pct"])
         self.assertIsNone(analytics["typed_accuracy_pct"])
+        self.assertIsNone(analytics["avg_confidence"])
+        self.assertEqual(analytics["scan_failures"], 0)
+
+    def test_scan_analytics_counts_engine_failures_separately_from_no_income(self):
+        record = {
+            "linked": True,
+            "ocr_value": None,
+            "declared_income": 120_000,
+            "match": {
+                "align_pct": 0.0,
+                "exact_match": False,
+                "status": "not_comparable",
+            },
+            "skipped": None,
+            "need_score": None,
+            "confidence": 0.0,
+            "line_count": 0,
+            "ocr_ms": 1.0,
+            "scan_failure": True,
+            "error": "No module named 'cv2'",
+        }
+
+        analytics = analytics_from({"itr.png": record}, 1.0)
+
+        self.assertEqual(analytics["scan_failures"], 1)
+        self.assertEqual(analytics["income_detected"], 0)
+        self.assertIsNone(analytics["avg_confidence"])
 
 
 class ForestStub:
@@ -158,6 +212,7 @@ class RankingAnalyticsTests(unittest.TestCase):
         self.assertEqual(row["income_delta"], 180_000)
         self.assertTrue(row["ocr_income_differs"])
         self.assertEqual(row["ocr_match_pct"], 40.0)
+        self.assertIsNone(row["ocr_error"])
         model_input, _ = features.matrix([row], columns=features.NOTEBOOK_FEATURE_COLUMNS)
         alternate_model_input, _ = features.matrix(
             [alternate_ocr_row],
@@ -170,6 +225,8 @@ class RankingAnalyticsTests(unittest.TestCase):
             {"application_id": 1, "declared_income": 120_000, "itr_path": "student/itr.png"},
             {
                 "ocr_value": None,
+                "error": "No income value detected in the ITR image",
+                "scan_failure": False,
                 "match": {
                     "align_pct": 0.0,
                     "exact_match": False,
@@ -179,6 +236,26 @@ class RankingAnalyticsTests(unittest.TestCase):
         )
 
         self.assertEqual(row["itr_trust"], "unverified")
+        self.assertFalse(row["ocr_scan_failed"])
+        self.assertEqual(row["ocr_error"], "No income value detected in the ITR image")
+
+    def test_ocr_engine_failure_is_exposed_separately_from_missing_income(self):
+        row = features.build_row(
+            {"application_id": 1, "declared_income": 120_000, "itr_path": "student/itr.png"},
+            {
+                "ocr_value": None,
+                "error": "No module named 'cv2'",
+                "scan_failure": True,
+                "match": {
+                    "align_pct": 0.0,
+                    "exact_match": False,
+                    "status": "not_comparable",
+                },
+            },
+        )
+
+        self.assertTrue(row["ocr_scan_failed"])
+        self.assertEqual(row["ocr_error"], "No module named 'cv2'")
 
     def test_sheet_reader_parses_upload_bytes(self):
         parsed = _parse_sheet(

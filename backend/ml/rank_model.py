@@ -124,6 +124,16 @@ def _dataset_analytics(synth: List[Dict], csv_rows: List[Dict], real_rows: List[
             "observed_npcinc": sum(1 for row in all_rows if row.get("target_source") == "npcinc"),
             "derived_proxy": sum(1 for row in all_rows if row.get("target_source") != "npcinc"),
         },
+        "target_classes": {
+            "priority": sum(
+                1 for row in all_rows
+                if float(row.get("priority_target") or 0.0) >= _config.HIGH_NEED_LABEL_SCORE
+            ),
+            "not_priority": sum(
+                1 for row in all_rows
+                if float(row.get("priority_target") or 0.0) < _config.HIGH_NEED_LABEL_SCORE
+            ),
+        },
         "with_income": len(incomes),
         "need_mean": round(float(np.mean(needs)), 2) if needs else None,
         # statutory priority flags actually present in the fit
@@ -351,6 +361,12 @@ def train(
         "regressor": reg,
         "feature_columns": list(used_columns),
         "model_id": model_id,
+        "model_params": {
+            "max_depth": max_depth,
+            "min_samples_leaf": min_samples_leaf,
+            "min_samples_split": 2 if income_ranked else 5,
+            "class_weight": "balanced",
+        },
         "medians": medians,
         "seed": seed,
         "n_trees": n_trees,
@@ -416,6 +432,7 @@ def train(
         "csv_warnings": list(csv_warnings),
         "dataset": analytics["dataset"],
         "n_trees": int(n_trees),
+        "model_params": payload["model_params"],
         "seed": int(seed),
         **analytics,
         "model_path": str(model_path).replace("\\", "/"),
@@ -577,6 +594,7 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
             or getattr(probe, "n_estimators", 0)
             or 0
         ),
+        "model_params": meta.get("model_params") or {},
     }
 
     # Feature importance is available straight from the forest even when the
@@ -595,6 +613,7 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
         "feature_columns": columns,
         "model_id": info["model_id"],
         "trained_at": info["trained_at"],
+        "model_params": info["model_params"],
         "external": True,
         "external_info": info,
         "n_samples": int(meta.get("n_samples") or 0),
@@ -698,6 +717,8 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
                     "declared_income",
                     "annual_income_family",
                     "ocr_income",
+                    "ocr_error",
+                    "ocr_scan_failed",
                     "income_used",
                     "income_source",
                     "income_delta",

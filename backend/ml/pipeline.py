@@ -147,7 +147,7 @@ def scan_documents(docs: list) -> tuple:
         )
 
         cached = ocr_cache.get(path, doc.get("size"), doc.get("updated_at"))
-        if cached:
+        if cached and not cached.get("scan_failure"):
             cache_hits += 1
             record = {**cached, "cached": True}
             record["application_id"] = doc.get("application_id")
@@ -159,13 +159,16 @@ def scan_documents(docs: list) -> tuple:
             )
             log(f"[{index}/{total}] {path} - cached OCR result reused ({record.get('ocr_ms', 0)} ms)")
         else:
-            log(f"[{index}/{total}] Scanning {path}")
+            if cached:
+                log(f"[{index}/{total}] Retrying previous OCR failure for {path}")
+            else:
+                log(f"[{index}/{total}] Scanning {path}")
             record = _scan_one(doc)
 
         if not record["error"] and not doc["linked"]:
             record["error"] = "No application linked to this ITR file"
 
-        if not record["cached"]:
+        if not record["cached"] and not record.get("scan_failure"):
             ocr_cache.put(path, doc.get("size"), doc.get("updated_at"), record)
 
         results[path] = record
@@ -214,6 +217,7 @@ def _scan_one(doc: dict) -> dict:
         "attempts": 0,
         "image": {},
         "cached": False,
+        "scan_failure": False,
         "skipped": None,
         "error": None,
     }
@@ -259,9 +263,9 @@ def _scan_one(doc: dict) -> dict:
                     record["ocr_value"] = outcome["extracted"]["value"]
                     record["method"] = outcome["extracted"]["method"]
                     record["low_confidence"] = bool(outcome["extracted"].get("low_confidence"))
+                    record["income_confidence"] = outcome["extracted"]["confidence"]
                     record["anchor"] = outcome["extracted"].get("anchor")
                     record["amount_line"] = outcome["extracted"].get("amount_line")
-                    record["confidence"] = outcome["extracted"]["confidence"]
                     record["variant"] = candidate["name"]
                     record["steps"] = candidate["steps"]
                     break
@@ -291,6 +295,7 @@ def _scan_one(doc: dict) -> dict:
             record["error"] = "No income value detected in the ITR image"
 
     except Exception as exc:
+        record["scan_failure"] = True
         record["error"] = str(exc)
         log(f"      failed: {exc}")
 
@@ -327,7 +332,11 @@ def analytics_from(results: dict, elapsed: float, engine=None) -> dict:
     exact = [r for r in comparable if r["match"]["exact_match"]]
     detected = [r for r in records if r["ocr_value"] is not None]
     aligned = [r["match"]["align_pct"] for r in comparable]
-    confidences = [r["confidence"] for r in records if r["confidence"]]
+    confidences = [r["confidence"] for r in records if r.get("line_count", 0) > 0]
+    income_confidences = [
+        r["income_confidence"] for r in detected if r.get("income_confidence") is not None
+    ]
+    scan_failures = [r for r in records if r.get("scan_failure")]
 
     for rec in linked:
         if rec.get("need_score") is None:
@@ -344,6 +353,10 @@ def analytics_from(results: dict, elapsed: float, engine=None) -> dict:
         "unlinked": len(records) - len(linked),
         "income_detected": len(detected),
         "detection_rate_pct": round(100.0 * len(detected) / len(records), 2) if records else 0.0,
+        "income_not_detected": sum(1 for r in records if r["ocr_value"] is None and not r.get("scan_failure")),
+        "declared_income_available": sum(1 for r in linked if r.get("declared_income") is not None),
+        "scan_failures": len(scan_failures),
+        "income_confidence_mean": round(sum(income_confidences) / len(income_confidences), 4) if income_confidences else None,
         "comparable": len(comparable),
         "exact_matches": len(exact),
         "mismatches": len(comparable) - len(exact),
@@ -351,7 +364,7 @@ def analytics_from(results: dict, elapsed: float, engine=None) -> dict:
         "avg_align_pct": round(sum(aligned) / len(aligned), 2) if aligned else None,
         "typed_accuracy_pct": round(sum(aligned) / len(aligned), 2) if aligned else None,
         "avg_need_score": round(sum(need_scores) / len(need_scores), 2) if need_scores else None,
-        "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0.0,
+        "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
         "total_ocr_ms": round(sum(r["ocr_ms"] for r in records), 1),
         "engine_load_ms": engine_obj.load_ms if engine_obj else 0.0,
         "engine": (engine_obj.engine_info if engine_obj and engine_obj.engine_info else {"status": "engine not loaded (all documents served from cache)"}),
@@ -755,6 +768,7 @@ def main() -> int:
                         "model_path": training.get("model_path"),
                         "model_id": training.get("model_id"),
                         "trained_at": training.get("trained_at"),
+                        "model_params": training.get("model_params"),
                         "model_size_kb": training.get("model_size_kb"),
                         "n_samples": training.get("n_samples"),
                         "n_real": training.get("n_real"),

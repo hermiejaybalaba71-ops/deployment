@@ -22,16 +22,19 @@ on the uploaded PSA FIES 2025 dataset.
 
 Local install: `py -3 -m pip install -r backend\requirements.txt` (install
 `onnxruntime-directml` last so it replaces the stock ONNX runtime). The Vercel
-ML service uses the same manifest with the Linux headless OpenCV wheel;
-`vercel.json` installs RapidOCR with `--no-deps` to avoid its extra desktop
-OpenCV dependency. The service imports OpenCV and ONNX Runtime directly and
-reports their versions from `/`, ensuring these runtime dependencies are
-included in the function bundle.
+ML service installs its declared dependencies from `backend/requirements.txt`,
+including RapidOCR, headless OpenCV, and CPU ONNX Runtime. No custom install
+command is used, allowing Vercel to optimize the function bundle.
 
 Do not add a custom Vercel `installCommand`: it disables Vercel's dependency
 bundle optimization. Check the deployment output after changes; if the OCR
 runtime still exceeds the project's 225 MB function limit, host the Python ML
 service separately and keep the Next.js app on Vercel.
+
+The ML service root health response reports `ocr_ready`, the loaded runtime
+versions, and any import errors. A healthy service with `ocr_ready: false` can
+still serve non-OCR requests, but ITR scans will report the specific runtime
+failure instead of claiming that no income was found.
 
 ## Files
 

@@ -16,7 +16,6 @@
       "root": "backend",
       "framework": "fastapi",
       "entrypoint": "app.main:app",
-      "buildCommand": "uv pip install --no-deps rapidocr-onnxruntime==1.2.3 || python -m pip install --no-deps rapidocr-onnxruntime==1.2.3",
       "functions": {
         "service.py": {
           "maxDuration": 300,

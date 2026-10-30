@@ -199,6 +199,8 @@ interface DocRecord {
   amount_line?: string | null;
   steps?: string[];
   accuracy_pct?: number | null;
+  scan_failure?: boolean;
+  income_confidence?: number | null;
   income_used?: number | null;
   income_source?: string | null;
   income_delta?: number | null;
@@ -221,14 +223,18 @@ interface ScanAnalytics {
   unlinked: number;
   income_detected: number;
   detection_rate_pct: number;
+  income_not_detected: number;
+  declared_income_available: number;
+  scan_failures: number;
   comparable: number;
   exact_matches: number;
   mismatches: number;
   match_rate_pct: number | null;
   avg_align_pct: number | null;
+  income_confidence_mean: number | null;
   typed_accuracy_pct?: number | null;
   avg_need_score?: number | null;
-  avg_confidence: number;
+  avg_confidence: number | null;
   total_ocr_ms: number;
   engine_load_ms: number;
   engine: Record<string, unknown>;
@@ -238,6 +244,9 @@ interface ScanAnalytics {
 
 interface TrainDataset {
   sources: { synthetic: number; csv: number; real: number };
+  label_sources?: { observed_npcinc: number; derived_proxy: number };
+  target_classes?: { priority: number; not_priority: number };
+  priority_flags?: Record<string, number>;
   total: number;
   with_income: number;
   need_mean: number | null;
@@ -257,6 +266,12 @@ interface TrainInfo {
   model_source?: string;
   model_id?: string | null;
   trained_at?: string | null;
+  model_params?: {
+    max_depth?: number | null;
+    min_samples_leaf?: number;
+    min_samples_split?: number;
+    class_weight?: string;
+  };
   persisted?: boolean;
   evaluation?: {
     available: boolean;
@@ -266,6 +281,7 @@ interface TrainInfo {
   };
   n_trees: number;
   seed: number;
+  feature_columns?: string[];
   accuracy: number | null;
   precision: number | null;
   recall: number | null;
@@ -292,6 +308,8 @@ interface RankedRow {
   declared_income: number | null;
   annual_income_family?: number | null;
   ocr_income: number | null;
+  ocr_error?: string | null;
+  ocr_scan_failed?: boolean;
   income_used: number | null;
   income_source?: string | null;
   income_delta?: number | null;
@@ -327,6 +345,33 @@ const pct = (value: number | null | undefined, digits = 1) =>
 /** Model metrics are fractions (0..1), e.g. 0.9565 -> "95.7%". */
 const fpct = (value: number | null | undefined, digits = 1) =>
   value == null ? "\u2014" : `${(Number(value) * 100).toFixed(digits)}%`;
+
+const INCOME_BRACKETS = [
+  { min: null, max: 100_000, label: "\u2264100k" },
+  { min: 100_000, max: 200_000, label: "100\u2013200k" },
+  { min: 200_000, max: 300_000, label: "200\u2013300k" },
+  { min: 300_000, max: 400_000, label: "300\u2013400k" },
+  { min: 400_000, max: 500_000, label: "400\u2013500k" },
+  { min: 500_000, max: null, label: ">500k" },
+];
+
+function incomeDistribution(values: Array<number | null | undefined>) {
+  const amounts = values.filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+  );
+  return INCOME_BRACKETS.map((bracket) => {
+    const count = amounts.filter(
+      (value) =>
+        (bracket.min == null || value > bracket.min) &&
+        (bracket.max == null || value <= bracket.max),
+    ).length;
+    return {
+      ...bracket,
+      count,
+      pct: amounts.length ? (count / amounts.length) * 100 : 0,
+    };
+  });
+}
 
 export default function MLRankingPage() {
   const router = useRouter();
@@ -1209,6 +1254,19 @@ export default function MLRankingPage() {
     saving: "Saving the ranking for CHED review",
   };
   const isOcrOnlyRun = lastRun?.mode === "scan" || busy === "scan";
+  const liveRankedRows = ranked.filter((row) => !row.savedResultOnly);
+  const declaredIncomeValues = liveRankedRows.map((row) => row.declared_income);
+  const ocrIncomeValues = liveRankedRows.map((row) => row.ocr_income);
+  const declaredIncomeCount = declaredIncomeValues.filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+  ).length;
+  const rankedIncomeBins = incomeDistribution(declaredIncomeValues);
+  const ocrIncomeBins = incomeDistribution(ocrIncomeValues);
+  const maxRankedIncomePct = Math.max(
+    ...rankedIncomeBins.map((bin) => bin.pct),
+    ...ocrIncomeBins.map((bin) => bin.pct),
+    1,
+  );
 
   return (
     <div className="space-y-4">
@@ -1494,6 +1552,22 @@ export default function MLRankingPage() {
                     </p>
                   </div>
                   <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Observed labels</p>
+                    <p className="font-extrabold text-[#241012]">
+                      {trainInfo.dataset?.label_sources?.observed_npcinc.toLocaleString() ?? "\u2014"}
+                    </p>
+                    <p>NPCINC target rows</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Priority class</p>
+                    <p className="font-extrabold text-[#241012]">
+                      {trainInfo.dataset?.target_classes
+                        ? `${trainInfo.dataset.target_classes.priority.toLocaleString()} / ${trainInfo.dataset.target_classes.not_priority.toLocaleString()}`
+                        : "\u2014"}
+                    </p>
+                    <p>priority / not priority</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
                     <p className="text-[9px] font-bold uppercase text-[#8B7376]">Holdout rows</p>
                     <p className="font-extrabold text-[#241012]">
                       {trainInfo.evaluation?.available ? trainInfo.evaluation.n_test.toLocaleString() : "Not evaluated"}
@@ -1510,10 +1584,21 @@ export default function MLRankingPage() {
                     </p>
                   )}
                   {trainInfo.trained_at && <p>Trained: {trainInfo.trained_at}</p>}
+                  <p>
+                    {trainInfo.feature_columns?.length ?? 0} input features &middot; {trainInfo.model_size_kb.toLocaleString()} KB
+                    {trainInfo.model_params && (
+                      <>
+                        {" \u00b7 "}max depth {trainInfo.model_params.max_depth ?? "unlimited"}
+                        {" \u00b7 "}min leaf {trainInfo.model_params.min_samples_leaf ?? "\u2014"}
+                        {" \u00b7 "}min split {trainInfo.model_params.min_samples_split ?? "\u2014"}
+                      </>
+                    )}
+                  </p>
                 </div>
                 <div>
                   <p className="mb-1 font-semibold text-[#241012]">Holdout evaluation</p>
                   {trainInfo.evaluation?.available ? (
+                    <>
                     <div className="flex flex-wrap gap-x-3 gap-y-1">
                       <span>Observed NPCINC &le; 4 labels</span>
                       <span>Accuracy <b className="text-[#241012]">{fpct(trainInfo.accuracy, 1)}</b></span>
@@ -1522,6 +1607,15 @@ export default function MLRankingPage() {
                       <span>F1 <b className="text-[#241012]">{fpct(trainInfo.f1, 1)}</b></span>
                       <span>ROC-AUC <b className="text-[#241012]">{fpct(trainInfo.roc_auc, 1)}</b></span>
                     </div>
+                    {trainInfo.confusion_matrix && (
+                      <p className="mt-1">
+                        Confusion matrix (actual rows: not-priority, priority; columns: predicted not-priority, priority):{" "}
+                        <b className="text-[#241012]">
+                          [[{trainInfo.confusion_matrix[0]?.join(", ") ?? "\u2014"}], [{trainInfo.confusion_matrix[1]?.join(", ") ?? "\u2014"}]]
+                        </b>
+                      </p>
+                    )}
+                    </>
                   ) : (
                     <p className="font-semibold text-amber-800">
                       No observed NPCINC holdout labels; model-quality metrics are not available.
@@ -1534,12 +1628,35 @@ export default function MLRankingPage() {
                       Data used: {trainInfo.dataset.sources.csv.toLocaleString()} uploaded &middot;{" "}
                       {trainInfo.dataset.sources.synthetic.toLocaleString()} generated &middot;{" "}
                       {trainInfo.dataset.sources.real.toLocaleString()} applicant rows
+                      {trainInfo.dataset.label_sources && (
+                        <> &middot; {trainInfo.dataset.label_sources.derived_proxy.toLocaleString()} proxy-labeled rows</>
+                      )}
+                    </p>
+                    <p>
+                      Training labels: {trainInfo.dataset.label_sources?.observed_npcinc.toLocaleString() ?? "\u2014"} observed NPCINC
+                      {" \u00b7 "}{trainInfo.dataset.label_sources?.derived_proxy.toLocaleString() ?? "\u2014"} proxy labels
                     </p>
                     {trainInfo.dataset.income && (
                       <p>
                         Annual family income min <b className="text-[#241012]">{peso(trainInfo.dataset.income.min)}</b>
+                        {" \u00b7 "}mean <b className="text-[#241012]">{peso(trainInfo.dataset.income.mean)}</b>
+                        {" \u00b7 "}p25 <b className="text-[#241012]">{peso(trainInfo.dataset.income.p25)}</b>
                         {" \u00b7 "}median <b className="text-[#241012]">{peso(trainInfo.dataset.income.median)}</b>
+                        {" \u00b7 "}p75 <b className="text-[#241012]">{peso(trainInfo.dataset.income.p75)}</b>
                         {" \u00b7 "}max <b className="text-[#241012]">{peso(trainInfo.dataset.income.max)}</b>
+                      </p>
+                    )}
+                    {trainInfo.dataset.priority_flags && (
+                      <p className="mt-1">
+                        Priority flags in training rows:{" "}
+                        {Object.entries(trainInfo.dataset.priority_flags)
+                          .map(([name, count]) => `${name.replace(/_/g, " ")} ${count.toLocaleString()}`)
+                          .join(" \u00b7 ")}
+                      </p>
+                    )}
+                    {trainInfo.dataset.need_mean != null && (
+                      <p>
+                        Mean training financial-need score: <b className="text-[#241012]">{trainInfo.dataset.need_mean.toFixed(1)}/100</b>
                       </p>
                     )}
                     {trainInfo.dataset.histogram && trainInfo.dataset.histogram.length > 0 && (
@@ -1566,6 +1683,20 @@ export default function MLRankingPage() {
                     )}
                   </div>
                 )}
+                {Object.keys(trainInfo.feature_importance || {}).length > 0 && (
+                  <div className="border-t border-[#241012]/[0.07] pt-2">
+                    <p className="mb-1 font-semibold text-[#241012]">Feature importance (trained forest)</p>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1">
+                      {Object.entries(trainInfo.feature_importance)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([name, value]) => (
+                          <span key={name}>
+                            {name.replace(/_/g, " ")} <b className="text-[#241012]">{(value * 100).toFixed(1)}%</b>
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -1578,6 +1709,7 @@ export default function MLRankingPage() {
                   <p className="mt-0.5 text-[10px] text-[#6B5458]">
                     {ocrAnalytics.documents_scanned.toLocaleString()} scanned ITR(s) &middot;{" "}
                     {ocrAnalytics.linked_to_application.toLocaleString()} linked application(s) &middot;{" "}
+                    {ocrAnalytics.skipped_documents.toLocaleString()} skipped &middot;{" "}
                     {ocrAnalytics.scan_seconds > 0 ? `${ocrAnalytics.scan_seconds.toFixed(1)}s` : "cached"}
                   </p>
                 </div>
@@ -1612,9 +1744,19 @@ export default function MLRankingPage() {
                 )}
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                   <div className="rounded-lg bg-[#FAF7F5] p-2">
-                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Income detected</p>
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">ITR income detected</p>
                     <p className="font-extrabold text-[#241012]">{ocrAnalytics.income_detected}/{ocrAnalytics.documents_scanned}</p>
                     <p>{pct(ocrAnalytics.detection_rate_pct)}</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Declared income received</p>
+                    <p className="font-extrabold text-[#241012]">{ocrAnalytics.declared_income_available}/{ocrAnalytics.linked_to_application}</p>
+                    <p>Linked scanned applications</p>
+                  </div>
+                  <div className={`rounded-lg p-2 ${ocrAnalytics.scan_failures ? "bg-red-50" : "bg-[#FAF7F5]"}`}>
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">OCR scan errors</p>
+                    <p className={`font-extrabold ${ocrAnalytics.scan_failures ? "text-red-700" : "text-[#241012]"}`}>{ocrAnalytics.scan_failures}</p>
+                    <p>{ocrAnalytics.income_not_detected} scanned, no income read</p>
                   </div>
                   <div className="rounded-lg bg-[#FAF7F5] p-2">
                     <p className="text-[9px] font-bold uppercase text-[#8B7376]">Compared</p>
@@ -1636,8 +1778,80 @@ export default function MLRankingPage() {
                   </div>
                   <div className="rounded-lg bg-[#FAF7F5] p-2">
                     <p className="text-[9px] font-bold uppercase text-[#8B7376]">Mean OCR confidence</p>
-                    <p className="font-extrabold text-[#241012]">{pct(ocrAnalytics.avg_confidence * 100)}</p>
+                    <p className="font-extrabold text-[#241012]">
+                      {ocrAnalytics.avg_confidence == null ? "No OCR text" : pct(ocrAnalytics.avg_confidence * 100)}
+                    </p>
+                    <p>Detected text lines</p>
                   </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Income-read confidence</p>
+                    <p className="font-extrabold text-[#241012]">
+                      {ocrAnalytics.income_confidence_mean == null ? "\u2014" : pct(ocrAnalytics.income_confidence_mean * 100)}
+                    </p>
+                    <p>Only documents with an extracted income</p>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-[#241012]/[0.07] p-3">
+                  <div className="flex flex-wrap justify-between gap-2">
+                    <p className="font-semibold text-[#241012]">Applicant annual family income distribution</p>
+                    <p>Declared income: {declaredIncomeCount}/{liveRankedRows.length} &middot; OCR income: {ocrAnalytics.income_detected}</p>
+                  </div>
+                  {liveRankedRows.length > 0 ? (
+                    <div className="mt-2 space-y-2">
+                      {[
+                        { label: "Declared/model input", bins: rankedIncomeBins, color: "bg-[#7B1113]/75" },
+                        { label: "ITR OCR read", bins: ocrIncomeBins, color: "bg-emerald-600/75" },
+                      ].map((series) => (
+                        <div key={series.label}>
+                          <p className="mb-1 text-[10px] font-semibold">{series.label}</p>
+                          <div className="flex items-end gap-1">
+                            {series.bins.map((bin) => (
+                              <div key={bin.label} className="flex min-w-0 flex-1 flex-col items-center gap-0.5" title={`${bin.label}: ${bin.count} applicants`}>
+                                <span className="text-[9px] font-semibold text-[#241012]">{bin.count}</span>
+                                <span className={`w-full rounded-t ${series.color}`} style={{ height: `${Math.max(3, Math.round((bin.pct / maxRankedIncomePct) * 32))}px` }} />
+                                <span className="whitespace-nowrap text-[8px]">{bin.label}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-amber-800">Ranking applicant income details were not saved or are unavailable in this run.</p>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[#241012]/[0.07] pt-2">
+                  <span>Applicants ranked <b className="text-[#241012]">{liveRankedRows.length}</b></span>
+                  <span>High need <b className="text-[#241012]">{liveRankedRows.filter((row) => row.prediction === "High Need").length}</b></span>
+                  <span>Low need <b className="text-[#241012]">{liveRankedRows.filter((row) => row.prediction === "Low Need").length}</b></span>
+                  <span>Mean model priority <b className="text-[#241012]">
+                    {liveRankedRows.length
+                      ? `${(liveRankedRows.reduce((total, row) => total + row.priority_score, 0) / liveRankedRows.length).toFixed(1)}%`
+                      : "\u2014"}
+                  </b></span>
+                  <span>Average probability <b className="text-[#241012]">
+                    {(() => {
+                      const probabilities = liveRankedRows
+                        .map((row) => row.probability)
+                        .filter((probability): probability is number => probability != null);
+                      return probabilities.length
+                        ? fpct(probabilities.reduce((total, probability) => total + probability, 0) / probabilities.length)
+                        : "\u2014";
+                    })()}
+                  </b></span>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[#241012]/[0.07] pt-2">
+                  <span>Documents in bucket <b className="text-[#241012]">{ocrAnalytics.documents_in_bucket}</b></span>
+                  <span>Unlinked <b className="text-[#241012]">{ocrAnalytics.unlinked}</b></span>
+                  <span>OCR cache hits <b className="text-[#241012]">{ocrAnalytics.cache_hits ?? 0}</b></span>
+                  <span>OCR time <b className="text-[#241012]">{(ocrAnalytics.total_ocr_ms / 1000).toFixed(1)}s</b></span>
+                  <span>Engine load <b className="text-[#241012]">{(ocrAnalytics.engine_load_ms / 1000).toFixed(1)}s</b></span>
+                  <span>Mean income-need score <b className="text-[#241012]">{ocrAnalytics.avg_need_score == null ? "\u2014" : `${ocrAnalytics.avg_need_score.toFixed(1)}/100`}</b></span>
+                  <span>OCR engine <b className="text-[#241012]">{String(ocrAnalytics.engine.engine ?? "unavailable")}</b></span>
+                  <span>Runtime <b className="text-[#241012]">{String(ocrAnalytics.engine.runtime ?? ocrAnalytics.engine.provider ?? ocrAnalytics.engine.status ?? "unavailable")}</b></span>
+                  {ocrAnalytics.engine.provider != null && (
+                    <span>Provider <b className="text-[#241012]">{String(ocrAnalytics.engine.provider)}</b></span>
+                  )}
                 </div>
                 <p className="rounded-lg border border-[#241012]/[0.07] px-3 py-2">
                   <b className="text-[#241012]">Income connection:</b> the student&rsquo;s declared annual family income is the model input. OCR independently reads the ITR and compares the two; OCR does not silently replace the declared value. Per-applicant income and match percentages are shown in the ranking table and OCR audit export.
@@ -1886,7 +2100,7 @@ export default function MLRankingPage() {
               ITR) to the right. */}
           <div className="relative">
             <div className="max-h-[70vh] overflow-auto [scrollbar-color:#7B111359_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#7B1113]/45 [&::-webkit-scrollbar-track]:bg-[#241012]/[0.04]">
-            <table className="w-full min-w-[980px] text-left text-xs">
+            <table className="w-full min-w-[1120px] text-left text-xs">
               <thead className="sticky top-0 z-10 bg-[#FAF7F5] text-[10px] uppercase tracking-wide text-[#6B5458] shadow-[0_1px_0_0_rgba(36,16,18,0.07)]">
                 <tr>
                   <th className="px-4 py-3 font-bold">Rank</th>
@@ -1895,7 +2109,8 @@ export default function MLRankingPage() {
                   <th className="px-4 py-3 font-bold">Year</th>
                   <th className="px-4 py-3 font-bold">Sex</th>
                   <th className="px-4 py-3 font-bold">Scholarship</th>
-                  <th className="px-4 py-3 font-bold">Declared / model income</th>
+                  <th className="px-4 py-3 font-bold">Declared annual family income</th>
+                  <th className="px-4 py-3 font-bold">ITR OCR income</th>
                   <th className="px-4 py-3 font-bold">OCR match</th>
                   <th className="px-4 py-3 font-bold">Financial need</th>
                   <th className="px-4 py-3 font-bold">Priority</th>
@@ -2250,19 +2465,30 @@ function RankRow({
         <td className="px-4 py-3 text-[#6B5458]">{row.sex || "\u2014"}</td>
         <td className="px-4 py-3 text-[#6B5458]">{row.scholarship}</td>
         <td className="whitespace-nowrap px-4 py-3">
-          <div className="font-semibold text-[#7B1113]">{peso(row.income_used ?? row.declared_income ?? row.annual_income_family)}</div>
+          <div className="font-semibold text-[#7B1113]">{peso(row.declared_income ?? row.annual_income_family)}</div>
           <div className="text-[10px] text-[#8B7376]">
             {row.savedResultOnly
-              ? "income details not saved"
-              : row.income_source === "declared"
-                ? "declared income · model input"
-                : "no declared income"}
+              ? "details not saved"
+              : row.declared_income == null
+                ? "not declared"
+                : "student input · model income"}
           </div>
-          {row.ocr_income_differs && row.income_delta != null && (
-            <div className="text-[10px] font-bold text-amber-700">
-              OCR differs {row.income_delta > 0 ? "+" : ""}{peso(row.income_delta)}
-            </div>
-          )}
+        </td>
+        <td className="whitespace-nowrap px-4 py-3" title={row.ocr_error || undefined}>
+          <div className={`font-semibold ${row.ocr_income == null ? "text-[#8B7376]" : "text-[#241012]"}`}>
+            {peso(row.ocr_income)}
+          </div>
+          <div className="max-w-[170px] truncate text-[10px] text-[#8B7376]">
+            {row.savedResultOnly
+              ? "OCR details not saved"
+              : row.ocr_income != null
+                ? "amount read from ITR"
+                : row.ocr_scan_failed && row.ocr_error
+                  ? `scan failed: ${row.ocr_error}`
+                  : row.itr_path
+                    ? "income not detected"
+                    : "no ITR uploaded"}
+          </div>
         </td>
         <td className="px-4 py-3">
           <span
@@ -2301,7 +2527,7 @@ function RankRow({
       </tr>
       {expanded && (
         <tr className="border-t border-[#241012]/[0.05] bg-[#FAF7F5]">
-          <td colSpan={12} className="px-4 py-4">
+          <td colSpan={13} className="px-4 py-4">
             <div className="grid gap-3 text-[11px] md:grid-cols-3">
               <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-3.5">
                 <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-[#6B5458]">OCR result</p>

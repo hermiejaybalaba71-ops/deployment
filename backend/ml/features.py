@@ -377,6 +377,8 @@ def build_row(applicant: Dict, ocr_result: Optional[Dict]) -> Dict:
         "sex": applicant.get("sex") or "",
         "declared_income": declared,
         "ocr_income": ocr_value,
+        "ocr_error": (ocr_result or {}).get("error"),
+        "ocr_scan_failed": bool((ocr_result or {}).get("scan_failure")),
         "income_used": income_used,
         "income_source": income_source,
         "income_delta": delta,

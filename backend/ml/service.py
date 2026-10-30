@@ -10,6 +10,7 @@ as JSON and receive the same NDJSON event stream pipeline.py writes to stdout.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import queue
@@ -19,9 +20,8 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Iterator
+from importlib.metadata import PackageNotFoundError, version
 
-import cv2
-import onnxruntime
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -61,13 +61,34 @@ def _runtime_python() -> tuple[str, dict[str, str]]:
 
 @app.get("/")
 def health() -> JSONResponse:
+    ocr_runtime: dict[str, str] = {}
+    errors: list[str] = []
+    for module_name, display_name in (("cv2", "opencv"), ("onnxruntime", "onnxruntime")):
+        try:
+            module = importlib.import_module(module_name)
+        except (ImportError, OSError) as exc:
+            errors.append(f"{display_name}: {exc}")
+        else:
+            ocr_runtime[display_name] = str(getattr(module, "__version__", "unknown"))
+
+    try:
+        importlib.import_module("rapidocr_onnxruntime")
+    except (ImportError, OSError) as exc:
+        errors.append(f"rapidocr: {exc}")
+    else:
+        try:
+            ocr_runtime["rapidocr"] = version("rapidocr-onnxruntime")
+        except PackageNotFoundError:
+            errors.append("rapidocr: rapidocr-onnxruntime is not installed")
+
     return JSONResponse(
         {
             "ok": True,
             "service": "ml",
             "python": sys.version.split()[0],
-            "opencv": cv2.__version__,
-            "onnxruntime": onnxruntime.__version__,
+            "ocr_ready": not errors,
+            "ocr_runtime": ocr_runtime,
+            "ocr_errors": errors,
         }
     )
 
