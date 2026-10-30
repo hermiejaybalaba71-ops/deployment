@@ -2,26 +2,7 @@
   "services": {
     "app": {
       "root": "frontend",
-      "framework": "nextjs",
-      "bindings": [
-        {
-          "type": "service",
-          "service": "ml",
-          "format": "url",
-          "env": "ML_URL"
-        }
-      ]
-    },
-    "ml": {
-      "root": "backend",
-      "framework": "fastapi",
-      "entrypoint": "app.main:app",
-      "functions": {
-        "service.py": {
-          "maxDuration": 300,
-          "excludeFiles": "{**/tests/**,**/test/**,**/testing/**,**/doc/**,**/docs/**,**/examples/**,**/benchmarks/**,**/__pycache__/**,**/*.pyc}"
-        }
-      }
+      "framework": "nextjs"
     }
   },
   "rewrites": [
