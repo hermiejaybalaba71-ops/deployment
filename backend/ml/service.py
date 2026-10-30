@@ -288,7 +288,7 @@ def _stream_pipeline(payload: dict) -> Iterator[str]:
     # used to end the NDJSON stream with no `done` at all, and the UI could
     # only say "the pipeline closed before it finished". Surface the real cause.
     if returncode != 0 and not saw_done:
-        tail = " | ".join(line for line in stderr_tail[-6:] if line.strip())
+        tail = " | ".join(line for line in list(stderr_tail)[-6:] if line.strip())
         error_event = {
             "type": "error",
             "message": (

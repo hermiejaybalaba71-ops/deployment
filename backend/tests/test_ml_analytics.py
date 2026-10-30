@@ -5,7 +5,6 @@ from io import BytesIO
 import contextlib
 import io
 import json
-from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,7 +22,7 @@ from ml.csv_data import _resolve, row_from
 from ml.ocr_engine import extract_income, match_declared
 from ml.pipeline import analytics_from, build_docs
 from ml.rank_model import load_external, predict, train
-from ml.service import MAX_SHEET_BYTES, _parse_sheet, health
+from ml.service import MAX_SHEET_BYTES, _parse_sheet, _stream_pipeline, health
 
 
 class OcrIncomeExtractionTests(unittest.TestCase):
@@ -80,27 +79,28 @@ class OcrIncomeExtractionTests(unittest.TestCase):
         self.assertEqual(match["align_pct"], 90.91)
         self.assertEqual(match["status"], "mismatch")
 
-    def test_vercel_uses_default_python_dependency_optimization(self):
+    def test_render_ml_service_is_separate_from_vercel_frontend(self):
         repository_root = Path(__file__).resolve().parents[2]
-        requirements = (repository_root / "backend" / "requirements.txt").read_text(
+        dockerfile = (repository_root / "Dockerfile").read_text(
             encoding="utf-8"
         )
         vercel_config = json.loads((repository_root / "vercel.json").read_text(encoding="utf-8"))
-        ml_service = vercel_config["services"]["ml"]
 
-        self.assertIn("rapidocr-onnxruntime==1.2.3", requirements)
-        self.assertIn("opencv-python==4.10.0.84 ; sys_platform != \"win32\"", requirements)
-        self.assertNotIn("installCommand", ml_service)
-        self.assertNotIn("buildCommand", ml_service)
+        self.assertEqual(set(vercel_config["services"]), {"app"})
+        self.assertIn("backend/requirements.txt", dockerfile)
 
     def test_ml_health_reports_required_ocr_runtime_modules(self):
-        with (
-            patch("ml.service.version", return_value="1.2.3"),
-            patch("ml.service.importlib.import_module", side_effect=[
-                SimpleNamespace(__version__="4.10.0"),
-                SimpleNamespace(__version__="1.24.0"),
-                SimpleNamespace(),
-            ]),
+        with patch(
+            "ml.service._probe_ocr_runtime",
+            return_value={
+                "ocr_runtime": {
+                    "opencv": "4.10.0",
+                    "onnxruntime": "1.24.0",
+                    "sklearn": "1.7.0",
+                    "rapidocr": "1.2.3",
+                },
+                "ocr_errors": [],
+            },
         ):
             payload = json.loads(health().body)
 
@@ -111,18 +111,42 @@ class OcrIncomeExtractionTests(unittest.TestCase):
         self.assertEqual(payload["ocr_runtime"]["rapidocr"], "1.2.3")
 
     def test_ml_health_exposes_missing_ocr_dependencies_without_failing_service(self):
-        with (
-            patch("ml.service.version", side_effect=PackageNotFoundError),
-            patch(
-                "ml.service.importlib.import_module",
-                side_effect=ModuleNotFoundError("No module named 'cv2'"),
-            ),
+        with patch(
+            "ml.service._probe_ocr_runtime",
+            return_value={
+                "ocr_runtime": {},
+                "ocr_errors": [
+                    "opencv-python: not installed",
+                    "onnxruntime: not installed",
+                    "rapidocr-onnxruntime: not installed",
+                ],
+            },
         ):
             payload = json.loads(health().body)
 
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["ocr_ready"])
         self.assertEqual(len(payload["ocr_errors"]), 3)
+
+    def test_pipeline_child_crash_still_emits_error_and_done_events(self):
+        process = SimpleNamespace(
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO("native runtime crashed\n"),
+            wait=lambda timeout: 137,
+            kill=lambda: None,
+        )
+        with patch("ml.service.subprocess.Popen", return_value=process):
+            events = [
+                json.loads(line)
+                for line in _stream_pipeline({"mode": "full"})
+            ]
+
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertFalse(events[-1]["ok"])
+        error = next(event for event in events if event["type"] == "error")
+        self.assertEqual(error["returncode"], 137)
+        self.assertIn("native runtime crashed", error["stderr_tail"])
 
     def test_scan_analytics_leaves_match_percent_unavailable_without_ocr_income(self):
         record = {
