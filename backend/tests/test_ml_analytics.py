@@ -80,6 +80,19 @@ class OcrIncomeExtractionTests(unittest.TestCase):
         self.assertEqual(match["align_pct"], 90.91)
         self.assertEqual(match["status"], "mismatch")
 
+    def test_vercel_ocr_dependencies_use_only_headless_opencv(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        requirements = (repository_root / "backend" / "requirements-vercel.txt").read_text(
+            encoding="utf-8"
+        )
+        vercel_config = json.loads((repository_root / "vercel.json").read_text(encoding="utf-8"))
+        ml_service = vercel_config["services"]["ml"]
+
+        self.assertIn("opencv-python-headless", requirements)
+        self.assertNotIn("rapidocr-onnxruntime", requirements)
+        self.assertIn("requirements-vercel.txt", ml_service["installCommand"])
+        self.assertIn("--no-deps rapidocr-onnxruntime==1.2.3", ml_service["buildCommand"])
+
     def test_ml_health_reports_required_ocr_runtime_modules(self):
         with (
             patch("ml.service.version", return_value="1.2.3"),
