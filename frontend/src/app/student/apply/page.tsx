@@ -67,6 +67,7 @@ function ApplyPageContent() {
     annualIncome: "",
   });
   const [itrFile, setItrFile] = useState<File | null>(null);
+  const [itrIncome, setItrIncome] = useState<number | null>(null);
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrStatus, setOcrStatus] = useState("");
   const [showSampleForm, setShowSampleForm] = useState(false);
@@ -77,6 +78,7 @@ function ApplyPageContent() {
 
   async function handleItrChange(file: File | null) {
     setItrFile(file);
+    setItrIncome(null);
     setOcrStatus("");
     if (!file) return;
     if (/\.(jpg|jpeg|png|webp)$/i.test(file.name)) {
@@ -101,8 +103,8 @@ function ApplyPageContent() {
             : amount.replace(/,/g, "");
           const parsed = Number(normalized);
           if (!isNaN(parsed) && parsed > 0) {
-            setForm((f) => ({ ...f, annualIncome: String(Math.round(parsed)) }));
-            setOcrStatus(`OCR detected annual income: ₱${Math.round(parsed).toLocaleString()} — verify it matches your ITR.`);
+            setItrIncome(Math.round(parsed));
+            setOcrStatus(`OCR read ₱${Math.round(parsed).toLocaleString()} from the ITR. Enter your declared annual family income to see the match percentage.`);
           } else {
             setOcrStatus("OCR read the ITR but could not detect income. Please enter it manually.");
           }
@@ -113,6 +115,8 @@ function ApplyPageContent() {
         setOcrStatus("OCR failed for this file. Please enter annual family income manually.");
       }
       setOcrBusy(false);
+    } else if (/\.pdf$/i.test(file.name)) {
+      setOcrStatus("PDF selected. Enter the annual family income shown on the ITR; automatic image matching supports JPG, PNG, and WEBP.");
     }
   }
 
@@ -253,6 +257,20 @@ function ApplyPageContent() {
 
   const PH_PHONE_RE = /^09\d{9}$/;
   const PH_ZIP_RE = /^\d{4}$/;
+  const declaredFamilyIncome = Number(form.annualIncome);
+  const itrMatchPct =
+    itrIncome !== null &&
+    form.annualIncome.trim() !== "" &&
+    Number.isFinite(declaredFamilyIncome) &&
+    declaredFamilyIncome >= 0
+      ? Math.max(
+          0,
+          Math.min(
+            100,
+            100 * (1 - Math.abs(itrIncome - declaredFamilyIncome) / Math.max(itrIncome, declaredFamilyIncome, 1)),
+          ),
+        )
+      : null;
   const NAME_RE = /^[A-Za-z\u00C0-\u00FF'.\- ]+$/;
 
   function validateNameField(label: string, value: string): string | null {
@@ -686,6 +704,23 @@ function ApplyPageContent() {
                 required
                 className="mt-1 w-full rounded-lg border border-[#241012]/15 bg-white px-3 py-2 text-xs outline-none focus:border-[#7B1113]"
               />
+              {itrIncome !== null && (
+                <span className="mt-1 block text-[11px] font-medium text-[#6B5458]">
+                  OCR read from ITR: <b className="text-[#7B1113]">₱{itrIncome.toLocaleString()}</b>
+                </span>
+              )}
+              {itrMatchPct !== null && (
+                <span
+                  aria-live="polite"
+                  className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${
+                    itrMatchPct >= 90
+                      ? "bg-emerald-100 text-emerald-800"
+                      : "bg-amber-100 text-amber-800"
+                  }`}
+                >
+                  OCR MATCH: {itrMatchPct.toFixed(2)}% {itrMatchPct >= 90 ? "— Match" : "— Review difference"}
+                </span>
+              )}
             </label>
             <label className="block text-xs font-semibold text-[#241012] sm:col-span-2">
               Income Tax Return (ITR) File * — JPG / PNG / PDF, max 10 MB
