@@ -20,15 +20,12 @@ on the uploaded PSA FIES 2025 dataset.
 | Model persistence (`rf_ranking_seed2026.joblib`) | joblib | 1.6.0 |
 | Storage, streaming, process bridge | FastAPI service | `backend/app/main.py` and `backend/ml/service.py` |
 
-Local install: `py -3 -m pip install -r backend\requirements.txt` (install
-`onnxruntime-directml` last so it replaces the stock ONNX runtime). The Vercel
-ML service installs `backend/requirements-vercel.txt`, which includes headless
-OpenCV and CPU ONNX Runtime. RapidOCR is installed separately with `--no-deps`
-because its package metadata requires the full `opencv-python` distribution;
-installing that alongside headless OpenCV duplicates large native libraries.
-The existing dependency set provides the `cv2` module RapidOCR uses without
-the second OpenCV distribution. Confirm the final bundle size in Vercel's
-deployment output after changing dependencies.
+Install dependencies locally with `py -3 -m pip install -r backend\requirements.txt`
+(install `onnxruntime-directml` last so it replaces the stock ONNX Runtime).
+Vercel uses the same `backend/requirements.txt` manifest through its default
+Python dependency installation and function-bundle optimization. Keep custom
+install/build commands out of `vercel.json`; they disable the automatic bundle
+optimization needed by the OCR and machine-learning dependencies.
 
 The ML service root health response reports `ocr_ready`, the loaded runtime
 versions, and any import errors. A healthy service with `ocr_ready: false` can
