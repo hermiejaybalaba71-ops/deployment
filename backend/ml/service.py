@@ -136,6 +136,16 @@ def _probe_ocr_runtime() -> dict:
 @app.get("/")
 def health() -> JSONResponse:
     probe = _probe_ocr_runtime()
+    current = peak = None
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    current = round(int(line.split()[1]) / 1024, 1)
+                elif line.startswith("VmHWM:"):
+                    peak = round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
     return JSONResponse(
         {
             "ok": True,
@@ -144,6 +154,8 @@ def health() -> JSONResponse:
             "ocr_ready": not probe["ocr_errors"],
             "ocr_runtime": probe["ocr_runtime"],
             "ocr_errors": probe["ocr_errors"],
+            "rss_mb": current,
+            "peak_mb": peak,
         }
     )
 

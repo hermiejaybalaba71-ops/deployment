@@ -64,8 +64,32 @@ def _json_safe(value):
     return value
 
 
+def _mem_mb() -> tuple[float | None, float | None]:
+    """Current + peak RSS in MB (Linux /proc; None elsewhere).
+
+    Render's free instance is 512 MB and a container killed for exceeding it
+    dies silently - no traceback reaches the logs. Recording RSS on every event
+    is how we tell an OOM kill from a Python crash.
+    """
+    current = peak = None
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    current = round(int(line.split()[1]) / 1024, 1)
+                elif line.startswith("VmHWM:"):
+                    peak = round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return current, peak
+
+
 def emit(payload: dict) -> None:
     payload.setdefault("t", round(time.time() - START_TIME, 2))
+    rss_mb, peak_mb = _mem_mb()
+    if rss_mb is not None:
+        payload.setdefault("rss_mb", rss_mb)
+        payload.setdefault("peak_mb", peak_mb)
     sys.stdout.write(json.dumps(_json_safe(payload), ensure_ascii=False, default=str, allow_nan=False) + "\n")
     sys.stdout.flush()
 
