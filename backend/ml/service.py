@@ -10,6 +10,7 @@ as JSON and receive the same NDJSON event stream pipeline.py writes to stdout.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import os
 import queue
@@ -234,13 +235,16 @@ def _stream_pipeline(payload: dict) -> Iterator[str]:
     )
 
     events: "queue.Queue" = queue.Queue(maxsize=1024)
+    stderr_tail: "collections.deque[str]" = collections.deque(maxlen=30)
 
-    def pump(stream, wrap=None) -> None:
+    def pump(stream, wrap=None, capture_tail=None) -> None:
         try:
             for line in stream:
                 line = line.rstrip("\n")
                 if not line.strip():
                     continue
+                if capture_tail is not None:
+                    capture_tail.append(line)
                 events.put(wrap(line) if wrap else json.dumps({"type": "log", "msg": line}) + "\n"
                            if not line.startswith("{") else line + "\n")
         except (ValueError, OSError):
@@ -251,7 +255,8 @@ def _stream_pipeline(payload: dict) -> Iterator[str]:
     threading.Thread(target=pump, args=(proc.stdout,), daemon=True).start()
     threading.Thread(
         target=pump,
-        args=(proc.stderr, lambda line: json.dumps({"type": "log", "msg": f"[python] {line}", "stream": "stderr"}) + "\n"),
+        args=(proc.stderr, lambda line: json.dumps({"type": "log", "msg": f"[python] {line}", "stream": "stderr"}) + "\n",
+              stderr_tail),
         daemon=True,
     ).start()
 
@@ -263,14 +268,34 @@ def _stream_pipeline(payload: dict) -> Iterator[str]:
         pass
 
     eof_count = 0
+    saw_done = False
     while eof_count < 2:
         item = events.get()
         if item is _EOF:
             eof_count += 1
         else:
+            if '"type": "done"' in item:
+                saw_done = True
             yield item
 
     try:
-        proc.wait(timeout=15)
+        returncode = proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
         proc.kill()
+        returncode = proc.wait(timeout=5)
+
+    # A child that dies silently (segfault, SIGKILL, unhandled native error)
+    # used to end the NDJSON stream with no `done` at all, and the UI could
+    # only say "the pipeline closed before it finished". Surface the real cause.
+    if returncode != 0 and not saw_done:
+        tail = " | ".join(line for line in stderr_tail[-6:] if line.strip())
+        error_event = {
+            "type": "error",
+            "message": (
+                f"The pipeline process exited with code {returncode} before emitting done."
+            ),
+            "returncode": returncode,
+            "stderr_tail": tail,
+        }
+        yield json.dumps(error_event) + "\n"
+        yield json.dumps({"type": "done", "ok": False, "crashed": True, "returncode": returncode}) + "\n"
