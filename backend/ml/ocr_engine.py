@@ -116,6 +116,10 @@ def _configure_ort_session() -> Dict[str, str]:
         sess_options = kwargs.get("sess_options")
         if sess_options is not None and not sess_options.enable_cpu_mem_arena:
             sess_options.enable_cpu_mem_arena = True
+        if sess_options is not None and not sess_options.intra_op_num_threads:
+            # One thread: 0.1 CPU cannot feed a pool, and every extra ORT thread
+            # keeps its own scratch buffers alive on a 512 MB instance.
+            sess_options.intra_op_num_threads = 1
         kwargs["providers"] = run_providers
         return original(model_path, *args, **kwargs)
 

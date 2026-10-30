@@ -31,7 +31,12 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY backend/ .
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    MALLOC_ARENA_MAX=2 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
 
 # Render assigns $PORT at runtime; 10000 is the local fallback.
 EXPOSE 10000

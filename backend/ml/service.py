@@ -10,7 +10,6 @@ as JSON and receive the same NDJSON event stream pipeline.py writes to stdout.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import os
 import queue
@@ -18,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Iterator
 from importlib.metadata import PackageNotFoundError, version
@@ -42,6 +42,17 @@ SHEET_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xltx"}
 def _runtime_python() -> tuple[str, dict[str, str]]:
     """Run the child pipeline with packages installed by Vercel's Python runtime."""
     runtime_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    # Render's free instance is 0.1 CPU / 512 MB. Letting BLAS/ONNX/OpenCV each
+    # spawn a thread pool buys no speed behind that quota but costs thread stacks
+    # and allocator arenas - enough to tip a 1-document OCR run into an OOM kill.
+    for key, value in (
+        ("OMP_NUM_THREADS", "1"),
+        ("OPENBLAS_NUM_THREADS", "1"),
+        ("MKL_NUM_THREADS", "1"),
+        ("NUMEXPR_NUM_THREADS", "1"),
+        ("MALLOC_ARENA_MAX", "2"),
+    ):
+        runtime_env.setdefault(key, value)
     site_packages = [
         path
         for root in (Path("/tmp/_vc_deps/lib"), Path("/var/task/.venv/lib"))
@@ -59,36 +70,80 @@ def _runtime_python() -> tuple[str, dict[str, str]]:
     return (str(virtualenv_python) if virtualenv_python.exists() else sys.executable), runtime_env
 
 
-@app.get("/")
-def health() -> JSONResponse:
+_OCR_PROBE: dict | None = None
+_OCR_PROBE_AT = 0.0
+OCR_PROBE_TTL = 300.0
+
+
+def _probe_ocr_runtime() -> dict:
+    """Verify the OCR stack in a throwaway child process.
+
+    Importing cv2 + onnxruntime here would keep ~250 MB resident in the API
+    process for the lifetime of the container. Render's free instance has
+    512 MB shared by this server *and* the pipeline child it spawns, so the
+    parent has to stay small or the OCR run gets the container OOM-killed
+    (that is what made /pipeline's stream end before ``done``).
+    """
+    global _OCR_PROBE, _OCR_PROBE_AT
+    now = time.monotonic()
+    if _OCR_PROBE is not None and now - _OCR_PROBE_AT < OCR_PROBE_TTL:
+        return dict(_OCR_PROBE)
+
     ocr_runtime: dict[str, str] = {}
     errors: list[str] = []
-    for module_name, display_name in (("cv2", "opencv"), ("onnxruntime", "onnxruntime")):
+    for name in ("opencv-python", "onnxruntime", "rapidocr-onnxruntime", "scikit-learn"):
         try:
-            module = importlib.import_module(module_name)
-        except (ImportError, OSError) as exc:
-            errors.append(f"{display_name}: {exc}")
-        else:
-            ocr_runtime[display_name] = str(getattr(module, "__version__", "unknown"))
-
-    try:
-        importlib.import_module("rapidocr_onnxruntime")
-    except (ImportError, OSError) as exc:
-        errors.append(f"rapidocr: {exc}")
-    else:
-        try:
-            ocr_runtime["rapidocr"] = version("rapidocr-onnxruntime")
+            ocr_runtime[name.split("-")[0]] = version(name)
         except PackageNotFoundError:
-            errors.append("rapidocr: rapidocr-onnxruntime is not installed")
+            errors.append(f"{name}: not installed")
 
+    if not errors:
+        python_bin, runtime_env = _runtime_python()
+        probe = (
+            "import json, cv2, onnxruntime, rapidocr_onnxruntime, sklearn;"
+            "print(json.dumps({'opencv': cv2.__version__,"
+            " 'onnxruntime': onnxruntime.__version__,"
+            " 'sklearn': sklearn.__version__}))"
+        )
+        try:
+            result = subprocess.run(
+                [python_bin, "-c", probe],
+                env=runtime_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=90,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append("ocr: import probe timed out")
+        else:
+            if result.returncode != 0:
+                detail = (result.stderr or "").strip().splitlines()
+                errors.append(f"ocr: {detail[-1] if detail else 'import failed'}")
+            else:
+                try:
+                    ocr_runtime.update(json.loads(result.stdout.strip().splitlines()[-1]))
+                except (json.JSONDecodeError, IndexError):
+                    errors.append("ocr: import probe returned unreadable output")
+
+    _OCR_PROBE = {"ocr_runtime": ocr_runtime, "ocr_errors": errors}
+    _OCR_PROBE_AT = now
+    return dict(_OCR_PROBE)
+
+
+@app.get("/")
+def health() -> JSONResponse:
+    probe = _probe_ocr_runtime()
     return JSONResponse(
         {
             "ok": True,
             "service": "ml",
             "python": sys.version.split()[0],
-            "ocr_ready": not errors,
-            "ocr_runtime": ocr_runtime,
-            "ocr_errors": errors,
+            "ocr_ready": not probe["ocr_errors"],
+            "ocr_runtime": probe["ocr_runtime"],
+            "ocr_errors": probe["ocr_errors"],
         }
     )
 
