@@ -14,7 +14,7 @@ reproduced exactly and reported in the analytics panel:
 from __future__ import annotations
 
 import io
-from typing import List, Optional, Tuple
+from typing import Generator, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageEnhance
@@ -22,6 +22,7 @@ from PIL import Image, ImageEnhance
 from . import config as _config
 
 _LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+MAX_OCR_SIDE = 2800
 
 
 def decode(source) -> Tuple[np.ndarray, dict]:
@@ -36,7 +37,16 @@ def decode(source) -> Tuple[np.ndarray, dict]:
         img = Image.open(str(source))
         origin = "path"
 
-    meta = {"format": img.format or "?", "size": list(img.size), "mode": img.mode}
+    source_size = list(img.size)
+    if max(img.size) > MAX_OCR_SIDE:
+        img.thumbnail((MAX_OCR_SIDE, MAX_OCR_SIDE), Image.LANCZOS)
+
+    meta = {
+        "format": img.format or "?",
+        "size": source_size,
+        "ocr_size": list(img.size),
+        "mode": img.mode,
+    }
     if img.mode in ("RGBA", "LA", "P"):
         background = Image.new("RGBA", img.size, (255, 255, 255, 255))
         converted = img.convert("RGBA")
@@ -137,43 +147,68 @@ def _to_rgb(gray: np.ndarray) -> np.ndarray:
     return np.repeat(gray[:, :, None], 3, axis=2).astype(np.uint8)
 
 
-def build_candidates(rgb: np.ndarray, include_deskew: bool = True) -> List[dict]:
+def build_candidates(rgb: np.ndarray, include_deskew: bool = True) -> Generator[dict, None, None]:
     """Ordered preprocessing variants handed to the OCR engine.
 
     ``original`` is always first (it is what the reference scans already use);
-    the rest are fallbacks tried only when no income value is detected.
+    the rest are built only when requested and tried only when no income value
+    is detected, keeping high-resolution image variants out of memory together.
     """
-    candidates: List[dict] = [{"name": "original", "array": rgb, "steps": ["decode"]}]
+    yield {"name": "original", "array": rgb, "steps": ["decode"]}
+    max_candidates = _config.OCR_MAX_VARIANTS + 1
+    yielded = 1
 
     upscaled = upscale(rgb)
     if upscaled.shape[:2] != rgb.shape[:2]:
-        candidates.append(
-            {"name": "upscale+sharpen", "array": upscaled, "steps": ["lanczos_upscale", "sharpen"]}
-        )
+        if yielded >= max_candidates:
+            return
+        yielded += 1
+        yield {
+            "name": "upscale+sharpen",
+            "array": upscaled,
+            "steps": ["lanczos_upscale", "sharpen"],
+        }
 
     gray = to_gray(upscaled)
+    del upscaled
     normalized = normalize(gray)
-    candidates.append(
-        {"name": "grayscale+contrast", "array": _to_rgb(normalized), "steps": ["grayscale", "percentile_stretch", "zscore"]}
-    )
+    if yielded >= max_candidates:
+        return
+    yielded += 1
+    contrast = _to_rgb(normalized)
+    yield {
+        "name": "grayscale+contrast",
+        "array": contrast,
+        "steps": ["grayscale", "percentile_stretch", "zscore"],
+    }
+    del contrast
 
+    if yielded >= max_candidates:
+        return
+    yielded += 1
     binary = otsu(normalized)
-    candidates.append(
-        {"name": "grayscale+otsu", "array": _to_rgb(binary), "steps": ["grayscale", "percentile_stretch", "otsu_threshold"]}
-    )
+    otsu_rgb = _to_rgb(binary)
+    del binary, normalized
+    yield {
+        "name": "grayscale+otsu",
+        "array": otsu_rgb,
+        "steps": ["grayscale", "percentile_stretch", "otsu_threshold"],
+    }
+    del otsu_rgb
 
     if include_deskew:
+        if yielded >= max_candidates:
+            return
         deskewed, angle = deskew(gray)
+        del gray
         if abs(angle) >= 0.5:
-            candidates.append(
-                {
-                    "name": f"deskew {angle:+.1f}deg",
-                    "array": _to_rgb(normalize(deskewed)),
-                    "steps": ["grayscale", f"deskew({angle:+.1f})", "percentile_stretch"],
-                }
-            )
-
-    return candidates[: _config.OCR_MAX_VARIANTS + 1]
+            yielded += 1
+            deskew_candidate = _to_rgb(normalize(deskewed))
+            yield {
+                "name": f"deskew {angle:+.1f}deg",
+                "array": deskew_candidate,
+                "steps": ["grayscale", f"deskew({angle:+.1f})", "percentile_stretch"],
+            }
 
 
 def image_stats(rgb: np.ndarray) -> dict:

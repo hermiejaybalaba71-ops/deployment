@@ -248,32 +248,42 @@ def _scan_one(doc: dict) -> dict:
 
     try:
         blob = storage.download(cfg.STORAGE_BUCKET, path)
+        blob_size = len(blob)
         rgb, meta = preproc.decode(blob)
-        record["image"] = {**meta, **preproc.image_stats(rgb), "bytes": len(blob)}
+        del blob
+        record["image"] = {**meta, **preproc.image_stats(rgb), "bytes": blob_size}
 
         # Storage also holds icons/thumbnails; OCR'ing them only burns time and
         # drags the detection rate down. A real ITR page is never this small.
-        if min(rgb.shape[:2]) < 500 or len(blob) < 20_000:
+        if min(rgb.shape[:2]) < 500 or blob_size < 20_000:
             record["skipped"] = f"{rgb.shape[1]}x{rgb.shape[0]} px - not an ITR page"
             record["error"] = "Skipped: image too small to be a document page"
-            log(f"      skipped ({rgb.shape[1]}x{rgb.shape[0]} px, {len(blob)} bytes)")
+            log(f"      skipped ({rgb.shape[1]}x{rgb.shape[0]} px, {blob_size} bytes)")
             return record
 
         if ocr_engine.peek() is None:
             log("Loading the RapidOCR engine (ONNX Runtime + DirectML GPU)...")
         engine = ocr_engine.shared()
         candidates = preproc.build_candidates(rgb)
+        candidate = next(candidates, None)
+        position = 0
+        last_outcome = None
+        last_candidate = None
 
-        for position, candidate in enumerate(candidates):
-            final_variant = position == len(candidates) - 1
+        while candidate is not None:
+            last_candidate = {
+                "name": candidate["name"],
+                "steps": candidate["steps"],
+            }
             levels = THRESHOLD_LEVELS if position == 0 else (THRESHOLD_LEVELS[-1],)
             for level_index, threshold in enumerate(levels):
                 record["attempts"] += 1
                 outcome = engine.scan(
                     candidate["array"],
                     box_thresh=threshold,
-                    allow_fallback=final_variant,
+                    allow_fallback=False,
                 )
+                last_outcome = outcome
                 record["line_count"] = outcome["line_count"]
                 record["confidence"] = outcome["avg_confidence"]
                 record["ocr_ms"] = round(record["ocr_ms"] + outcome["ocr_ms"], 1)
@@ -306,11 +316,34 @@ def _scan_one(doc: dict) -> dict:
 
             if record["ocr_value"] is not None:
                 break
-            if position < len(candidates) - 1:
+            candidate_name = candidate["name"]
+            candidate = None
+            candidate = next(candidates, None)
+            if candidate is not None:
                 log(
                     f"      retrying preprocessing: "
-                    f"'{candidate['name']}' -> '{candidates[position + 1]['name']}'"
+                    f"'{candidate_name}' -> '{candidate['name']}'"
                 )
+                position += 1
+
+        candidates.close()
+        candidate = None
+        if record["ocr_value"] is None and last_outcome is not None:
+            extracted = ocr_engine.extract_income(
+                last_outcome["lines"],
+                allow_fallback=True,
+            )
+            if extracted:
+                record["ocr_value"] = extracted["value"]
+                record["method"] = extracted["method"]
+                record["low_confidence"] = bool(extracted.get("low_confidence"))
+                record["income_confidence"] = extracted["confidence"]
+                record["anchor"] = extracted.get("anchor")
+                record["amount_line"] = extracted.get("amount_line")
+                record["variant"] = last_candidate["name"]
+                record["steps"] = last_candidate["steps"]
+
+        del last_outcome, last_candidate, rgb
 
         record["match"] = ocr_engine.match_declared(
             record["ocr_value"], doc.get("declared_income")
