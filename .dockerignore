@@ -1,0 +1,23 @@
+# Keep the Docker build context small: only backend/ is copied into the image.
+.git
+.gitignore
+.next
+.vercel
+.vercel/**
+node_modules
+frontend
+docs
+tools
+*.sql
+*.pdf
+*.png
+*.xlsx
+*.csv
+*.docx
+*.md
+__pycache__
+**/__pycache__
+*.pyc
+.env*
+*.log
+*.tsbuildinfo
