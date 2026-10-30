@@ -240,7 +240,6 @@ interface TrainDataset {
   sources: { synthetic: number; csv: number; real: number };
   total: number;
   with_income: number;
-  coverage: { has_itr: number; ocr_verified: number };
   need_mean: number | null;
   income?: { min: number; p25: number; median: number; p75: number; max: number; mean: number };
   histogram?: Array<{ label: string; count: number; pct: number }>;
@@ -256,6 +255,8 @@ interface TrainInfo {
   // Data panel's scholarship_rf_model.joblib) instead of refitting locally.
   external?: boolean;
   model_source?: string;
+  model_id?: string | null;
+  trained_at?: string | null;
   persisted?: boolean;
   evaluation?: {
     available: boolean;
@@ -1207,15 +1208,7 @@ export default function MLRankingPage() {
     ranking: "Ranking applicants by financial need",
     saving: "Saving the ranking for CHED review",
   };
-
-  const docsWithTypedIncome = docs.filter((d) => d.declared_income != null).length;
-  const docsFromItr = docs.filter((d) => d.ocr_value != null && d.declared_income != null).length;
-  const docsCorrected = docs.filter(
-    (d) =>
-      d.ocr_value != null &&
-      d.declared_income != null &&
-      Math.abs(Number(d.ocr_value) - Number(d.declared_income)) > 0.5,
-  ).length;
+  const isOcrOnlyRun = lastRun?.mode === "scan" || busy === "scan";
 
   return (
     <div className="space-y-4">
@@ -1466,156 +1459,191 @@ export default function MLRankingPage() {
       </div>
 
       {(ocrAnalytics || trainInfo) && (
-        <div className="rounded-2xl border border-[#241012]/[0.07] bg-white px-4 py-2.5 shadow-sm">
+        <div className="grid gap-3 lg:grid-cols-2" aria-label="Training and ranking analytics">
+          {trainInfo && (
+            <section className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#241012]/[0.07] bg-[#FAF7F5]/70 px-4 py-3">
+                <div>
+                  <h2 className="text-xs font-extrabold uppercase tracking-wide text-[#7B1113]">Training data + model analytics</h2>
+                  <p className="mt-0.5 text-[10px] text-[#6B5458]">
+                    {trainInfo.external ? "Loaded trained model" : "Model trained in this run"} &middot; {trainInfo.n_trees} trees &middot; seed {trainInfo.seed}
+                  </p>
+                </div>
+                <span className={`rounded-full px-2.5 py-1 text-[9px] font-extrabold uppercase tracking-wide ${
+                  trainInfo.persisted ? "bg-emerald-500/10 text-emerald-700" : "bg-amber-100 text-amber-800"
+                }`}>
+                  {trainInfo.persisted ? "saved model" : "runtime model"}
+                </span>
+              </div>
+              <div className="space-y-3 p-4 text-[11px] leading-5 text-[#6B5458]">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Training rows</p>
+                    <p className="font-extrabold text-[#241012]">{trainInfo.n_samples.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Uploaded rows</p>
+                    <p className="font-extrabold text-[#241012]">{(trainInfo.n_csv ?? 0).toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Income available</p>
+                    <p className="font-extrabold text-[#241012]">
+                      {trainInfo.dataset
+                        ? `${trainInfo.dataset.with_income.toLocaleString()}/${trainInfo.dataset.total.toLocaleString()}`
+                        : "\u2014"}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Holdout rows</p>
+                    <p className="font-extrabold text-[#241012]">
+                      {trainInfo.evaluation?.available ? trainInfo.evaluation.n_test.toLocaleString() : "Not evaluated"}
+                    </p>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-[#241012]/[0.07] px-3 py-2">
+                  <p className="font-semibold text-[#241012]">Model identity</p>
+                  {trainInfo.model_id ? (
+                    <code className="break-all text-[10px]">ID: {trainInfo.model_id}</code>
+                  ) : (
+                    <p className="font-semibold text-amber-800">
+                      This older model has no saved ID, so a link to a specific training run cannot be confirmed.
+                    </p>
+                  )}
+                  {trainInfo.trained_at && <p>Trained: {trainInfo.trained_at}</p>}
+                </div>
+                <div>
+                  <p className="mb-1 font-semibold text-[#241012]">Holdout evaluation</p>
+                  {trainInfo.evaluation?.available ? (
+                    <div className="flex flex-wrap gap-x-3 gap-y-1">
+                      <span>Observed NPCINC &le; 4 labels</span>
+                      <span>Accuracy <b className="text-[#241012]">{fpct(trainInfo.accuracy, 1)}</b></span>
+                      <span>Precision <b className="text-[#241012]">{fpct(trainInfo.precision, 1)}</b></span>
+                      <span>Recall <b className="text-[#241012]">{fpct(trainInfo.recall, 1)}</b></span>
+                      <span>F1 <b className="text-[#241012]">{fpct(trainInfo.f1, 1)}</b></span>
+                      <span>ROC-AUC <b className="text-[#241012]">{fpct(trainInfo.roc_auc, 1)}</b></span>
+                    </div>
+                  ) : (
+                    <p className="font-semibold text-amber-800">
+                      No observed NPCINC holdout labels; model-quality metrics are not available.
+                    </p>
+                  )}
+                </div>
+                {trainInfo.dataset && (
+                  <div className="border-t border-[#241012]/[0.07] pt-2">
+                    <p>
+                      Data used: {trainInfo.dataset.sources.csv.toLocaleString()} uploaded &middot;{" "}
+                      {trainInfo.dataset.sources.synthetic.toLocaleString()} generated &middot;{" "}
+                      {trainInfo.dataset.sources.real.toLocaleString()} applicant rows
+                    </p>
+                    {trainInfo.dataset.income && (
+                      <p>
+                        Annual family income min <b className="text-[#241012]">{peso(trainInfo.dataset.income.min)}</b>
+                        {" \u00b7 "}median <b className="text-[#241012]">{peso(trainInfo.dataset.income.median)}</b>
+                        {" \u00b7 "}max <b className="text-[#241012]">{peso(trainInfo.dataset.income.max)}</b>
+                      </p>
+                    )}
+                    {trainInfo.dataset.histogram && trainInfo.dataset.histogram.length > 0 && (
+                      <div className="mt-2 flex items-end gap-1" aria-label="Training income distribution">
+                        {(() => {
+                          const hist = trainInfo.dataset!.histogram!;
+                          const maxPct = Math.max(...hist.map((bin) => bin.pct), 1);
+                          return hist.map((bin) => (
+                            <span
+                              key={bin.label}
+                              className="flex w-9 flex-col items-center gap-0.5"
+                              title={`${bin.label}: ${bin.count} rows (${bin.pct}%)`}
+                            >
+                              <span className="text-[9px] font-semibold">{bin.count}</span>
+                              <span
+                                className="w-full rounded-t bg-[#7B1113]/70"
+                                style={{ height: `${Math.max(4, Math.round((bin.pct / maxPct) * 26))}px` }}
+                              />
+                              <span className="whitespace-nowrap text-[8px] leading-none">{bin.label}</span>
+                            </span>
+                          ));
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
           {ocrAnalytics && (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] leading-5 text-[#6B5458]">
-              <span className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]">OCR</span>
-              <span>
-                <b className="text-[#241012]">{ocrAnalytics.documents_scanned}</b> ITRs (selected program)
-              </span>
-              <span className="text-[#D3C8C4]">|</span>
-              <span title="ITR images where an income figure was detected">
-                detected <b className="text-[#241012]">{ocrAnalytics.income_detected}/{ocrAnalytics.documents_scanned}</b>
-              </span>
-              <span className="text-[#D3C8C4]">|</span>
-              <span title="Typed income exactly matches the figure OCR read from the ITR">
-                exact <b className="text-[#241012]">{ocrAnalytics.exact_matches}/{ocrAnalytics.comparable}</b>
-              </span>
-              <span className="text-[#D3C8C4]">|</span>
-              <span>
-                drives need <b className="text-[#241012]">{docsFromItr}/{docsWithTypedIncome}</b>
-                {docsCorrected > 0 ? ` (${docsCorrected} corrected)` : ""}
-              </span>
-              <span className="text-[#D3C8C4]">|</span>
-              <span title="How close the income the applicant typed is to the figure OCR read from the ITR">
-                income match accuracy <b className="text-[#241012]">{pct(ocrAnalytics.typed_accuracy_pct ?? ocrAnalytics.avg_align_pct, 1)}</b>
-              </span>
-              <span className="text-[#D3C8C4]">|</span>
-              <span title="Average 0-100 financial-need score computed from the ITR income">
-                average financial-need score <b className="text-[#241012]">{ocrAnalytics.avg_need_score != null ? `${ocrAnalytics.avg_need_score.toFixed(1)}/100` : "\u2014"}</b>
-              </span>
-              <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-[#7B1113]/[0.07] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#7B1113]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#7B1113]" />
-                {ocrAnalytics.scan_seconds > 0 ? `${ocrAnalytics.scan_seconds.toFixed(1)}s` : "cached"}
-              </span>
-            </div>
-          )}
-          {trainInfo && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-[#241012]/[0.06] pt-2 text-[11px] leading-5 text-[#6B5458]">
-              <span
-                className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]"
-                title="Summary of the Random Forest used for this ranking run."
-              >
-                Model summary
-              </span>
-              <span>
-                <b className="text-[#241012]">{trainInfo.n_trees}</b> decision trees &middot;{" "}
-                {trainInfo.n_samples.toLocaleString()} training rows
-                {trainInfo.n_csv ? ` (${trainInfo.n_csv.toLocaleString()} uploaded)` : ""}
-              </span>
-              <span className="text-[#D3C8C4]">|</span>
-              {Object.entries(trainInfo.feature_importance)
-                .filter(([, value]) => value >= 0.01)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 2)
-                .map(([name, value]) => (
-                  <span key={name} title="Share of the ranking decision carried by this factor">
-                    {name.replace(/_/g, " ")} <b className="text-[#241012]">{(value * 100).toFixed(0)}%</b>
-                  </span>
-                ))}
-              <span className="text-[#D3C8C4]">|</span>
-              <span
-                className={`font-bold ${trainInfo.persisted ? "text-emerald-700" : "text-red-700"}`}
-                title={
-                  trainInfo.persisted
-                    ? "The model and its training analytics are persisted in Supabase Storage."
-                    : "This model exists only in the current runtime and may not survive another serverless invocation."
-                }
-              >
-                {trainInfo.persisted ? `saved \u2713` : "not saved to Storage"}
-              </span>
-            </div>
-          )}
-          {trainInfo && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-[#241012]/[0.06] pt-2 text-[11px] leading-5 text-[#6B5458]">
-              <span
-                className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]"
-                title="Only held-out rows with an observed NPCINC label are used to calculate model-quality metrics."
-              >
-                Model evaluation
-              </span>
-              {trainInfo.evaluation?.available ? (
-                <>
-                  <span>
-                    Tested on <b className="text-[#241012]">{trainInfo.evaluation.n_test.toLocaleString()}</b> held-out labeled rows
-                    {" \u00b7 "}label: <b className="text-[#241012]">observed NPCINC &le; 4</b>
-                  </span>
-                  <span>accuracy <b className="text-[#241012]">{fpct(trainInfo.accuracy, 1)}</b></span>
-                  <span>precision <b className="text-[#241012]">{fpct(trainInfo.precision, 1)}</b></span>
-                  <span>recall <b className="text-[#241012]">{fpct(trainInfo.recall, 1)}</b></span>
-                  <span>F1 <b className="text-[#241012]">{fpct(trainInfo.f1, 1)}</b></span>
-                  <span>ROC-AUC <b className="text-[#241012]">{fpct(trainInfo.roc_auc, 1)}</b></span>
-                </>
-              ) : (
-                <span className="font-semibold text-amber-800">
-                  Not independently evaluated: this run has no observed NPCINC labels. Proxy labels are not presented as model-accuracy claims.
+            <section className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#241012]/[0.07] bg-[#FAF7F5]/70 px-4 py-3">
+                <div>
+                  <h2 className="text-xs font-extrabold uppercase tracking-wide text-[#7B1113]">AI ranking + ITR/OCR analytics</h2>
+                  <p className="mt-0.5 text-[10px] text-[#6B5458]">
+                    {ocrAnalytics.documents_scanned.toLocaleString()} scanned ITR(s) &middot;{" "}
+                    {ocrAnalytics.linked_to_application.toLocaleString()} linked application(s) &middot;{" "}
+                    {ocrAnalytics.scan_seconds > 0 ? `${ocrAnalytics.scan_seconds.toFixed(1)}s` : "cached"}
+                  </p>
+                </div>
+                <span className={`rounded-full px-2.5 py-1 text-[9px] font-extrabold uppercase tracking-wide ${
+                  trainInfo?.model_id
+                    ? "bg-emerald-500/10 text-emerald-700"
+                    : isOcrOnlyRun
+                      ? "bg-[#241012]/[0.06] text-[#6B5458]"
+                      : "bg-amber-100 text-amber-800"
+                }`}>
+                  {trainInfo?.model_id
+                    ? "model link confirmed"
+                    : isOcrOnlyRun
+                      ? "OCR scan only"
+                      : "model link not confirmed"}
                 </span>
-              )}
-            </div>
-          )}
-          {trainInfo?.dataset && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[#241012]/[0.06] pt-2 text-[11px] leading-5 text-[#6B5458]">
-              <span
-                className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]"
-                title="Breakdown of the rows used to train the model."
-              >
-                Training data
-              </span>
-              <span title="Rows used by this training run">
-                <b className="text-[#241012]">{trainInfo.dataset.total.toLocaleString()}</b> total rows &middot;{" "}
-                {trainInfo.dataset.sources.csv.toLocaleString()} uploaded &middot;{" "}
-                {trainInfo.dataset.sources.synthetic.toLocaleString()} generated &middot;{" "}
-                {trainInfo.dataset.sources.real.toLocaleString()} applicants
-              </span>
-              {trainInfo.dataset.histogram && trainInfo.dataset.histogram.length > 0 && (
-                <span
-                  className="flex items-end gap-1"
-                  title="Family-income distribution of every training row (per ₱100k bracket)"
-                >
-                  {(() => {
-                    const hist = trainInfo.dataset.histogram!;
-                    const maxPct = Math.max(...hist.map((h) => h.pct), 1);
-                    return hist.map((bin) => (
-                      <span
-                        key={bin.label}
-                        className="flex w-9 flex-col items-center gap-0.5"
-                        title={`${bin.label}: ${bin.count} rows (${bin.pct}%)`}
-                      >
-                        <span className="text-[9px] font-semibold text-[#6B5458]">{bin.count}</span>
-                        <span
-                          className="w-full rounded-t bg-[#7B1113]/70"
-                          style={{ height: `${Math.max(4, Math.round((bin.pct / maxPct) * 26))}px` }}
-                        />
-                        <span className="whitespace-nowrap text-[8px] leading-none text-[#8B7376]">{bin.label}</span>
-                      </span>
-                    ));
-                  })()}
-                </span>
-              )}
-              {trainInfo.dataset.income && (
-                <span title="Income quantiles across the training set (min / 25th percentile / median / 75th / max)">
-                  min <b className="text-[#241012]">₱{Math.round(trainInfo.dataset.income.min).toLocaleString()}</b> &middot; p25{" "}
-                  <b className="text-[#241012]">₱{Math.round(trainInfo.dataset.income.p25).toLocaleString()}</b> &middot; med{" "}
-                  <b className="text-[#241012]">₱{Math.round(trainInfo.dataset.income.median).toLocaleString()}</b> &middot; p75{" "}
-                  <b className="text-[#241012]">₱{Math.round(trainInfo.dataset.income.p75).toLocaleString()}</b> &middot; max{" "}
-                  <b className="text-[#241012]">₱{Math.round(trainInfo.dataset.income.max).toLocaleString()}</b>
-                </span>
-              )}
-              <span title="Training rows with an uploaded ITR / an OCR-read income figure">
-                ITR/income records <b className="text-[#241012]">{trainInfo.dataset.coverage.has_itr.toLocaleString()}/{trainInfo.dataset.total.toLocaleString()}</b>
-                {" \u00b7 "}OCR verified <b className="text-[#241012]">{trainInfo.dataset.coverage.ocr_verified.toLocaleString()}/{trainInfo.dataset.total.toLocaleString()}</b>
-              </span>
-            </div>
+              </div>
+              <div className="space-y-3 p-4 text-[11px] leading-5 text-[#6B5458]">
+                {trainInfo?.model_id ? (
+                  <div className="rounded-lg border border-emerald-700/20 bg-emerald-50/60 px-3 py-2">
+                    <p className="font-semibold text-[#241012]">Same model ID as the training analytics</p>
+                    <code className="break-all text-[10px]">{trainInfo.model_id}</code>
+                  </div>
+                ) : isOcrOnlyRun ? (
+                  <p className="rounded-lg border border-[#241012]/[0.07] bg-[#FAF7F5] px-3 py-2">
+                    This run scanned ITRs only; no AI ranking model was used.
+                  </p>
+                ) : (
+                  <p className="rounded-lg border border-amber-700/20 bg-amber-50 px-3 py-2 font-semibold text-amber-900">
+                    The ranking run has no model ID, so it cannot be verified against a specific training result.
+                  </p>
+                )}
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Income detected</p>
+                    <p className="font-extrabold text-[#241012]">{ocrAnalytics.income_detected}/{ocrAnalytics.documents_scanned}</p>
+                    <p>{pct(ocrAnalytics.detection_rate_pct)}</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Compared</p>
+                    <p className="font-extrabold text-[#241012]">{ocrAnalytics.comparable}</p>
+                    <p>OCR read + declared income</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Exact matches</p>
+                    <p className="font-extrabold text-[#241012]">{ocrAnalytics.exact_matches}/{ocrAnalytics.comparable}</p>
+                    <p>Exact match rate {pct(ocrAnalytics.match_rate_pct)}</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Mismatches</p>
+                    <p className="font-extrabold text-[#241012]">{ocrAnalytics.mismatches}</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Average income alignment</p>
+                    <p className="font-extrabold text-[#241012]">{pct(ocrAnalytics.typed_accuracy_pct ?? ocrAnalytics.avg_align_pct)}</p>
+                  </div>
+                  <div className="rounded-lg bg-[#FAF7F5] p-2">
+                    <p className="text-[9px] font-bold uppercase text-[#8B7376]">Mean OCR confidence</p>
+                    <p className="font-extrabold text-[#241012]">{pct(ocrAnalytics.avg_confidence * 100)}</p>
+                  </div>
+                </div>
+                <p className="rounded-lg border border-[#241012]/[0.07] px-3 py-2">
+                  <b className="text-[#241012]">Income connection:</b> the student&rsquo;s declared annual family income is the model input. OCR independently reads the ITR and compares the two; OCR does not silently replace the declared value. Per-applicant income and match percentages are shown in the ranking table and OCR audit export.
+                </p>
+              </div>
+            </section>
           )}
         </div>
       )}
@@ -1649,6 +1677,12 @@ export default function MLRankingPage() {
                     : "save to Storage must succeed before later rankings can reuse this model"}
                 </span>
               </p>
+              {lastRun.trainInfo?.model_id && (
+                <p className="mt-1 text-[10px] text-[#6B5458]">
+                  Model ID: <code className="break-all font-semibold text-[#241012]">{lastRun.trainInfo.model_id}</code>
+                  {" \u00b7 "}compare this ID with the AI Ranking analytics to confirm the same model was used.
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
               <a

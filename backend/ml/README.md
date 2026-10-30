@@ -87,7 +87,12 @@ are only available on the non-Colab regressor path; the Colab-aligned training
 fits only the classifier. Incomplete uploaded TOINC/NPCINC data is rejected
 rather than scored with proxy labels. Model-evaluation analytics and live
 OCR/ranking analytics are displayed separately so training-label validation
-isn't confused with the current applicants' OCR match results.
+isn't confused with the current applicants' OCR match results. The dashboard
+shows a persistent model ID in both panels when available, so an admin can
+confirm that the ranking run used the same saved artifact whose training
+analytics are displayed. Legacy model files without an ID are marked
+unconfirmed. Training-data income coverage counts usable income values only;
+it does not claim that training rows contain ITR images or were OCR-verified.
 
 ## Performance on the reference machine (AMD Athlon 300GE, 2C/4T)
 

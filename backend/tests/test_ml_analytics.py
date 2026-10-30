@@ -309,6 +309,7 @@ class RankingAnalyticsTests(unittest.TestCase):
             model = load_external(path=model_path)
 
         self.assertFalse(model["evaluation"]["available"])
+        self.assertIsNone(model["model_id"])
         self.assertIsNone(model["accuracy"])
         self.assertIsNone(model["f1"])
         self.assertIsNone(model["roc_auc"])
@@ -364,6 +365,10 @@ class RankingAnalyticsTests(unittest.TestCase):
         self.assertEqual(restored["roc_auc"], trained["roc_auc"])
         self.assertEqual(restored["dataset"], trained["dataset"])
         self.assertEqual(restored["evaluation"], trained["evaluation"])
+        self.assertRegex(trained["model_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(payload["model_id"], trained["model_id"])
+        self.assertEqual(restored["model_id"], trained["model_id"])
+        self.assertNotIn("coverage", trained["dataset"])
         self.assertTrue(restored["persisted"])
         self.assertIsNone(payload["regressor"])
         classifier_params = trained["classifier"].get_params()

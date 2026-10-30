@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -106,8 +107,6 @@ def _dataset_analytics(synth: List[Dict], csv_rows: List[Dict], real_rows: List[
     all_rows = list(synth) + list(csv_rows) + list(real_rows)
     incomes: List[float] = []
     needs: List[float] = []
-    has_itr = 0
-    verified = 0
     for row in all_rows:
         income = _income_of(row)
         if income is None:
@@ -117,10 +116,6 @@ def _dataset_analytics(synth: List[Dict], csv_rows: List[Dict], real_rows: List[
             needs.append(float(row.get("financial_need_score") or 0.0))
         except (TypeError, ValueError):
             pass
-        if row.get("has_itr"):
-            has_itr += 1
-        if row.get("ocr_verified"):
-            verified += 1
 
     out: Dict = {
         "sources": {"synthetic": len(synth), "csv": len(csv_rows), "real": len(real_rows)},
@@ -130,7 +125,6 @@ def _dataset_analytics(synth: List[Dict], csv_rows: List[Dict], real_rows: List[
             "derived_proxy": sum(1 for row in all_rows if row.get("target_source") != "npcinc"),
         },
         "with_income": len(incomes),
-        "coverage": {"has_itr": has_itr, "ocr_verified": verified},
         "need_mean": round(float(np.mean(needs)), 2) if needs else None,
         # statutory priority flags actually present in the fit
         "priority_flags": {
@@ -351,10 +345,12 @@ def train(
 
     _config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model_path = _config.MODEL_DIR / f"rf_ranking_seed{seed}.joblib"
+    model_id = uuid.uuid4().hex
     payload = {
         "classifier": clf,
         "regressor": reg,
         "feature_columns": list(used_columns),
+        "model_id": model_id,
         "medians": medians,
         "seed": seed,
         "n_trees": n_trees,
@@ -423,6 +419,8 @@ def train(
         "seed": int(seed),
         **analytics,
         "model_path": str(model_path).replace("\\", "/"),
+        "model_id": model_id,
+        "trained_at": payload["created_at"],
         "model_size_kb": size_kb,
         # Set on a train-panel run: the path the main AI-Ranking will load
         # (scholarship_rf_model.joblib). The pipeline logs it so the admin can
@@ -567,6 +565,7 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
     )
     info = {
         "model_path": str(model_path).replace("\\", "/"),
+        "model_id": meta.get("model_id"),
         "model_size_kb": size_kb,
         "source": meta.get("source") or "external",
         "trained_at": meta.get("created_at"),
@@ -594,6 +593,8 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
         "regressor": reg,
         "medians": medians,
         "feature_columns": columns,
+        "model_id": info["model_id"],
+        "trained_at": info["trained_at"],
         "external": True,
         "external_info": info,
         "n_samples": int(meta.get("n_samples") or 0),

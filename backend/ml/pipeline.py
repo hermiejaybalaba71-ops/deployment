@@ -677,6 +677,7 @@ def main() -> int:
                     f"Using the externally trained model -> {info.get('model_path')} "
                     f"({info.get('model_size_kb')} KB, seed {info.get('seed')}, "
                     f"{info.get('n_trees')} trees, {info.get('n_features')} features, "
+                    f"model ID {info.get('model_id') or 'unavailable'}, "
                     f"trained {info.get('trained_at') or 'at an earlier time'})."
                 )
                 log(
@@ -752,6 +753,8 @@ def main() -> int:
                         "external": True,
                         "model_source": "external",
                         "model_path": training.get("model_path"),
+                        "model_id": training.get("model_id"),
+                        "trained_at": training.get("trained_at"),
                         "model_size_kb": training.get("model_size_kb"),
                         "n_samples": training.get("n_samples"),
                         "n_real": training.get("n_real"),
@@ -760,6 +763,7 @@ def main() -> int:
                         "n_trees": training.get("n_trees"),
                         "seed": training.get("seed"),
                         "feature_columns": training.get("feature_columns"),
+                        "evaluation": training.get("evaluation"),
                         "accuracy": training.get("accuracy"),
                         "precision": training.get("precision"),
                         "recall": training.get("recall"),
